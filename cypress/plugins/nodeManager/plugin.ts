@@ -3,14 +3,26 @@ import * as path from "path";
 import * as childProcess from "child_process";
 import fetch from "node-fetch";
 import waitOn from "wait-on";
-import type { NodeSession, PeerId } from "./shared";
-import { Commands } from "./shared";
 
-type NodeId = number;
+import type {
+  ConnectNodeOptions,
+  NodeId,
+  NodeManagerPlugin,
+  NodeSession,
+  OnboardNodeOptions,
+  PeerId,
+} from "./shared";
+import { pluginMethods } from "./shared";
+
 type PeerAddress = string;
 type AuthToken = string;
 
 const ROOT_PATH = path.join(__dirname, "../../../");
+
+const PROXY_BINARY_PATH = path.join(
+  ROOT_PATH,
+  "proxy/target/debug/radicle-proxy"
+);
 
 // IP to which all started processes will bind to.
 const HOST = "127.0.0.1";
@@ -68,7 +80,6 @@ class Node {
   id: NodeId;
   httpPort: number;
   peerPort: number;
-  proxyBinaryPath: string;
 
   get authToken(): AuthToken {
     if (this.state.kind !== StateKind.Onboarded) {
@@ -98,7 +109,7 @@ class Node {
     return this.state.kind;
   }
 
-  constructor(options: { id: NodeId; proxyBinaryPath: string }) {
+  constructor(options: { id: NodeId }) {
     this.logger = new Logger({
       prefix: `[${options.id}]: `,
       indentationLevel: 2,
@@ -107,14 +118,13 @@ class Node {
     this.id = options.id;
     this.httpPort = options.id;
     this.peerPort = options.id;
-    this.proxyBinaryPath = path.join(ROOT_PATH, options.proxyBinaryPath);
   }
 
   async start() {
     this.logger.log("starting node");
 
     const process = childProcess.spawn(
-      this.proxyBinaryPath,
+      PROXY_BINARY_PATH,
       [
         "--test",
         "--http-listen",
@@ -146,7 +156,10 @@ class Node {
     this.logger.log("node started successfully");
   }
 
-  async onboard(options: { handle: string; passphrase: string }) {
+  async onboard(options: {
+    handle: string;
+    passphrase: string;
+  }): Promise<NodeSession> {
     this.logger.log("onboarding node");
 
     if (this.state.kind !== StateKind.Started) {
@@ -195,16 +208,24 @@ class Node {
       }
     );
     const json = await identitiesResponse.json();
+    const peerId = json.peerId;
 
     this.state = {
       ...this.state,
       kind: StateKind.Onboarded,
       authToken: authToken,
       peerAddress: `${json.peerId}@${HOST}:${this.peerPort}`,
-      peerId: json.peerId,
+      peerId,
     };
 
     this.logger.log("node onboarded successfully");
+
+    return {
+      id: this.id,
+      authToken,
+      httpPort: this.httpPort,
+      peerId,
+    };
   }
 
   stop(): void {
@@ -219,24 +240,10 @@ class Node {
   }
 }
 
-interface StartNodeOptions {
-  id: NodeId;
-  proxyBinaryPath: string;
-}
-
-interface OnboardNodeOptions {
-  id: NodeId;
-  handle: string;
-  passphrase: string;
-}
-
-interface ConnectNodeOptions {
-  nodeIds: NodeId[];
-}
-
-class NodeManager {
+class NodeManager implements NodeManagerPlugin {
   private managedNodes: Node[] = [];
   private logger: Logger;
+  private nextPort: number = 17000;
 
   constructor() {
     this.logger = new Logger({ prefix: `[nodeManager] ` });
@@ -254,26 +261,29 @@ class NodeManager {
     return node;
   };
 
-  async startNode(options: StartNodeOptions): Promise<void> {
+  async startNode(): Promise<number> {
+    const id = this.nextPort++;
     this.logger.log("startNode");
 
-    const node = new Node(options);
+    const node = new Node({ id });
     await node.start();
     this.managedNodes.push(node);
+
+    return id;
   }
 
-  async onboardNode(options: OnboardNodeOptions): Promise<void> {
+  async onboardNode(options: OnboardNodeOptions): Promise<NodeSession> {
     this.logger.log("onboardNode");
 
     const node = this.getNode(options.id);
 
-    await node.onboard({
+    return node.onboard({
       handle: options.handle,
       passphrase: options.passphrase,
     });
   }
 
-  async connectNodes(options: ConnectNodeOptions) {
+  async connectNodes(options: ConnectNodeOptions): Promise<null> {
     this.logger.log("connectNodes");
 
     if (options.nodeIds.length < 2) {
@@ -308,26 +318,7 @@ class NodeManager {
     return null;
   }
 
-  async getOnboardedNodes(): Promise<NodeSession[]> {
-    this.logger.log("getOnboardedNodes");
-
-    const onboardedNodes: NodeSession[] = [];
-
-    this.managedNodes.forEach(node => {
-      if (node.authToken && node.httpPort) {
-        onboardedNodes.push({
-          id: node.id,
-          authToken: node.authToken,
-          peerId: node.peerId,
-          httpPort: node.httpPort,
-        });
-      }
-    });
-
-    return onboardedNodes;
-  }
-
-  stopAllNodes(): void {
+  async stopAllNodes(): Promise<null> {
     this.logger.log("stopAllNodes");
 
     this.managedNodes.forEach(node => {
@@ -335,47 +326,27 @@ class NodeManager {
     });
 
     this.managedNodes = [];
+
+    this.nextPort = 17000;
+
+    return null;
   }
 }
 
 const nodeManager = new NodeManager();
 
+function createNodeManagerPlugin(plugin: NodeManagerPlugin): NodeManagerPlugin {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const nodeManagerPlugin: any = {};
+  pluginMethods.forEach(method => {
+    nodeManagerPlugin[method] = plugin[method].bind(plugin);
+  });
+  return nodeManagerPlugin;
+}
+
+export const nodeManagerPlugin = createNodeManagerPlugin(nodeManager);
+
 // Clean up any lingering radicle-proxy processes when closing Cypress.
 exitHook(() => {
   nodeManager.stopAllNodes();
 });
-
-export const nodeManagerPlugin = {
-  [Commands.StartNode]: async ({
-    id,
-    proxyBinaryPath = "proxy/target/debug/radicle-proxy",
-  }: StartNodeOptions): Promise<null> => {
-    await nodeManager.startNode({ id, proxyBinaryPath });
-
-    return null;
-  },
-  [Commands.OnboardNode]: async ({
-    id,
-    handle = "secretariat",
-    passphrase = "radicle-upstream",
-  }: OnboardNodeOptions): Promise<null> => {
-    await nodeManager.onboardNode({ id, handle, passphrase });
-
-    return null;
-  },
-  [Commands.GetOnboardedNodes]: async (): Promise<NodeSession[]> => {
-    return nodeManager.getOnboardedNodes();
-  },
-  [Commands.ConnectNodes]: async (
-    options: ConnectNodeOptions
-  ): Promise<null> => {
-    await nodeManager.connectNodes(options);
-
-    return null;
-  },
-  [Commands.StopAllNodes]: (): null => {
-    nodeManager.stopAllNodes();
-
-    return null;
-  },
-};

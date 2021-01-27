@@ -12,10 +12,36 @@ export interface NodeSession {
   httpPort: number;
 }
 
-export enum Commands {
-  StartNode = "startNode",
-  OnboardNode = "onboardNode",
-  StopAllNodes = "stopAllNodes",
-  GetOnboardedNodes = "getOnboardedNodes",
-  ConnectNodes = "connectNodes",
+export type NodeId = number;
+
+export interface StartNodeOptions {
+  id: NodeId;
 }
+
+export interface OnboardNodeOptions {
+  id: NodeId;
+  handle: string;
+  passphrase: string;
+}
+
+export interface ConnectNodeOptions {
+  nodeIds: NodeId[];
+}
+
+// We us `Promise<null>` because Cypress complains if we use
+// `Promise<void>` or `Promise<undefined>`.
+//
+// See https://docs.cypress.io/api/commands/task.html#Usage
+export interface NodeManagerPlugin {
+  startNode: () => Promise<number>;
+  onboardNode: (options: OnboardNodeOptions) => Promise<NodeSession>;
+  connectNodes: (options: ConnectNodeOptions) => Promise<null>;
+  stopAllNodes: () => Promise<null>;
+}
+
+export const pluginMethods: Array<keyof NodeManagerPlugin> = [
+  "startNode",
+  "onboardNode",
+  "stopAllNodes",
+  "connectNodes",
+];
