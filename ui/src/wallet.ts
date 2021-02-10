@@ -98,7 +98,7 @@ export function build(
       uriStore.set(uri);
       modal.toggle(path.walletQRCode(), onModalHide);
     },
-    close: async () => {
+    close: () => {
       // N.B: this is actually called when the connection is established,
       // not when the modal is closed per se.
       stateStore.set({ status: Status.Connecting });
